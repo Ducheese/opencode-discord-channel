@@ -1,4 +1,4 @@
-import { EmbedBuilder } from "discord.js"
+import { EmbedBuilder } from "@discordjs/builders"
 
 const SEPARATOR_PATTERN = /^\|?\s*[-:]+[-| :]*$/
 const TABLE_EMBED_COLOR = 0x2b2d31

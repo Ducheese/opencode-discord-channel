@@ -6,6 +6,16 @@ import {
 import type { DiscordClientWrapper } from "./discord-client"
 import type { ConnectionStateManager } from "./state"
 import type { QuestionAnswer, QuestionInfo } from "./types"
+import * as fs from "fs"
+import * as os from "os"
+import * as path from "path"
+
+const logFile = path.join(os.tmpdir(), "opencode-discord-channel.log")
+function log(msg: string) {
+  try {
+    fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`)
+  } catch {}
+}
 
 type SessionPromptFn = (params: {
   sessionID: string
@@ -64,14 +74,6 @@ export function createInboundBridge(deps: InboundBridgeDeps): void {
     getQuestionInfo,
     onShowAgents,
   } = deps
-  const fs = require("fs")
-  const logFile = "/tmp/opencode-discord-channel.log"
-
-  function log(msg: string) {
-    try {
-      fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`)
-    } catch {}
-  }
 
   log("[init] inbound bridge created")
 

@@ -3,7 +3,7 @@ import {
   ActionRowBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
-} from "discord.js"
+} from "@discordjs/builders"
 import type { AgentInfo } from "./types"
 
 const SELECT_MENU_ID = "agent_select"

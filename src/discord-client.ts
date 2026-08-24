@@ -1,20 +1,26 @@
-import {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
-  Routes,
-} from "discord.js"
+import { proxyUrl, setupProxy } from "./proxy"
 import type {
+  Client,
+  TextChannel,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   StringSelectMenuBuilder,
   MessageActionRowComponentBuilder,
 } from "discord.js"
-import { TextChannel } from "discord.js"
 import { splitMessage } from "./message-splitter"
 import type { DiscordMessage } from "./types"
+import { ProxyAgent as UndiciProxyAgent } from "undici"
+import * as fs from "fs"
+import * as os from "os"
+import * as path from "path"
+
+const logFile = path.join(os.tmpdir(), "opencode-discord-channel.log")
+function log(msg: string) {
+  try {
+    fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`)
+  } catch {}
+}
 
 export type DiscordClientWrapper = ReturnType<typeof createDiscordClient>
 
@@ -53,20 +59,28 @@ export function createDiscordClient() {
   return {
     async connect(token: string): Promise<void> {
       if (discordClient) {
-        await discordClient.destroy()
+        await discordClient.destroy().catch(() => {})
         discordClient = null
         botUserId = null
       }
 
-      discordClient = new Client({
+      // Ensure proxy is configured BEFORE discord.js is imported
+      setupProxy()
+      const { Client: DiscordClient, GatewayIntentBits } = await import("discord.js")
+
+      discordClient = new DiscordClient({
         intents: [
           GatewayIntentBits.Guilds,
           GatewayIntentBits.GuildMessages,
           GatewayIntentBits.MessageContent,
         ],
+        rest: {
+          agent: proxyUrl ? new UndiciProxyAgent(proxyUrl) : undefined,
+        },
       })
 
       discordClient.on("messageCreate", (msg: any) => {
+        log(`[dc] raw messageCreate from=${msg.author?.id} channel=${msg.channelId} content="${msg.content?.slice(0, 30)}"`)
         if (!messageHandler) return
         messageHandler({
           content: msg.content,
@@ -175,7 +189,7 @@ export function createDiscordClient() {
     },
 
     async disconnect(): Promise<void> {
-      await discordClient?.destroy()
+      await discordClient?.destroy().catch(() => {})
       discordClient = null
       botUserId = null
     },
@@ -282,6 +296,7 @@ export function createDiscordClient() {
     },
 
     async registerSlashCommands(token: string, channelId: string): Promise<void> {
+      const { SlashCommandBuilder, REST, Routes } = await import("discord.js")
       const commands = [
         new SlashCommandBuilder()
           .setName("agents")
@@ -291,7 +306,10 @@ export function createDiscordClient() {
           .setDescription("Show OpenCode bridge status"),
       ].map((c) => c.toJSON())
 
-      const rest = new REST({ version: "10" }).setToken(token)
+      const rest = new REST({
+        version: "10",
+        agent: proxyUrl ? new UndiciProxyAgent(proxyUrl) : undefined,
+      }).setToken(token)
       const appId = discordClient?.user?.id
       if (!appId) return
 

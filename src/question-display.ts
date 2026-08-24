@@ -4,11 +4,10 @@ import {
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   ButtonBuilder,
-  ButtonStyle,
   ModalBuilder,
   TextInputBuilder,
-  TextInputStyle,
-} from "discord.js"
+} from "@discordjs/builders"
+import { ButtonStyle, TextInputStyle } from "discord-api-types/v10"
 import type { QuestionInfo } from "./types"
 
 const QUESTION_SELECT_PREFIX = "q_select_"
