@@ -233,6 +233,7 @@ const plugin: Plugin = async (ctx) => {
       discordClient,
       state,
       sessionPrompt: async (p) => {
+        outbound?.markDiscordTurn(p.sessionID)
         await promptSession({
           sessionID: p.sessionID,
           agent: p.agent,
@@ -241,6 +242,8 @@ const plugin: Plugin = async (ctx) => {
       },
       onAgentSwitch: async (agentName) => {
         state.setCurrentAgent(agentName)
+        const sid = state.getSessionId()
+        if (sid) outbound?.markDiscordTurn(sid)
         await promptSession({
           sessionID: state.getSessionId()!,
           agent: agentName,

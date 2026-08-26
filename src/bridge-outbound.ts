@@ -62,6 +62,7 @@ type OpenCodeEvent =
 export function createOutboundBridge(deps: OutboundBridgeDeps): {
   handleEvent: (event: OpenCodeEvent) => Promise<void>
   trackInjectedText: (text: string) => void
+  markDiscordTurn: (sessionID: string) => void
 } {
   const { discordClient, state, fetchAgents } = deps
   const display = deps.agentDisplay ?? {
@@ -70,6 +71,8 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
   }
   const textBuffer = new Map<string, string>()
   const injectedTexts = new Set<string>()
+  const pendingUserTexts = new Set<string>()
+  const discordTurnSessions = new Set<string>()
   let cachedAgents: AgentInfo[] | null = null
   let cachedAt = 0
   const CACHE_TTL = 30_000
@@ -84,6 +87,11 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
 
   function trackInjectedText(text: string) {
     injectedTexts.add(text)
+    pendingUserTexts.add(text)
+  }
+
+  function markDiscordTurn(sessionID: string) {
+    discordTurnSessions.add(sessionID)
   }
 
   async function handleEvent(event: OpenCodeEvent): Promise<void> {
@@ -97,9 +105,14 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       if (!part) return
       if (part.sessionID !== connectedSessionId) return
       if (part.type !== "text") return
-      if (part.text && injectedTexts.has(part.text)) {
-        injectedTexts.delete(part.text)
-        return
+      if (part.text) {
+        const trimmed = part.text.trim()
+        for (const t of injectedTexts) {
+          if (trimmed === t.trim()) return
+        }
+        for (const t of pendingUserTexts) {
+          if (trimmed === t.trim()) return
+        }
       }
       const partKey = part.id ?? part.messageID
       if (!partKey || typeof part.text !== "string") return
@@ -114,6 +127,32 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
     if (event.type === "session.idle") {
       const channelId = state.getChannelId()
       if (!channelId) return
+
+      // Only mirror to Discord if this turn was initiated from Discord
+      if (!discordTurnSessions.has(connectedSessionId)) {
+        textBuffer.clear()
+        pendingUserTexts.clear()
+        injectedTexts.clear()
+        return
+      }
+      discordTurnSessions.delete(connectedSessionId)
+
+      // Strip user's prompt if it leaked into buffer
+      if (textBuffer.size > 0 && pendingUserTexts.size > 0) {
+        const firstKey = textBuffer.keys().next().value as string | undefined
+        const firstText = firstKey ? textBuffer.get(firstKey) : undefined
+        if (firstText) {
+          const ft = firstText.trim()
+          for (const t of pendingUserTexts) {
+            if (ft === t.trim() || ft.startsWith(t.trim())) {
+              textBuffer.delete(firstKey!)
+              break
+            }
+          }
+        }
+      }
+      pendingUserTexts.clear()
+      injectedTexts.clear()
 
       const menuMsgId = state.getAgentMenuMessageId()
       if (menuMsgId) {
@@ -143,6 +182,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       const req = event.properties
       if (!req || !req.id || !req.questions?.length) return
       if (req.sessionID !== connectedSessionId) return
+      if (!discordTurnSessions.has(connectedSessionId)) return
 
       const channelId = state.getChannelId()
       if (!channelId) return
@@ -167,11 +207,12 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       event.type === "session.status" &&
       event.properties?.status?.type === "busy"
     ) {
+      if (!discordTurnSessions.has(connectedSessionId)) return
       const channelId = state.getChannelId()
       if (!channelId) return
       await discordClient.startTyping(channelId)
     }
   }
 
-  return { handleEvent, trackInjectedText }
+  return { handleEvent, trackInjectedText, markDiscordTurn }
 }

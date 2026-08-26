@@ -82,8 +82,20 @@ export function createDiscordClient() {
       discordClient.on("messageCreate", (msg: any) => {
         log(`[dc] raw messageCreate from=${msg.author?.id} channel=${msg.channelId} content="${msg.content?.slice(0, 30)}"`)
         if (!messageHandler) return
+        if (msg.author?.bot) return
+        // 仅当 @Bot 时才转发，避免另一机器人或普通聊天被误投喂
+        if (!botUserId || !msg.mentions?.has?.(botUserId)) {
+          log(`[dc] ignored non-mention from=${msg.author?.id}`)
+          return
+        }
+        // 去掉开头的 @提及，保持内容干净
+        let content = msg.content ?? ""
+        if (botUserId) {
+          // discord.js 会把 <@botId> / <@!botId> 两种形式都放进 mentions
+          content = content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim()
+        }
         messageHandler({
-          content: msg.content,
+          content,
           authorId: msg.author.id,
           username: msg.author.username,
           channelId: msg.channelId,
