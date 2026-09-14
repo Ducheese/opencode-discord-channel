@@ -442,11 +442,21 @@ const plugin: Plugin = async (ctx) => {
         questionRequests.set(evt.properties.id, evt.properties)
       }
 
-      // Auto-connect on session.created or first session event
+      // Auto-connect on session.created or first session event.
+      // Subagent sessions must never steal the bridge: every session gets its
+      // own plugin instance, and a second gateway connect with the same token
+      // kicks the previous one on Discord's side (2026-09-13: a review Task's
+      // instance rebound the bridge to itself and answered Discord from there).
+      // Subagent sessions always carry info.parentID; main sessions don't.
       if (evt.type === "session.created" && !state.isConnected() && !isConnecting) {
-        const sid = evt.properties?.sessionID ?? evt.properties?.info?.id ?? evt.properties?.id
-        if (sid) {
-          void tryAutoConnect(sid)
+        const info = evt.properties?.info
+        if (info?.parentID) {
+          log(`[auto-connect] skip subagent session ${info.id} (parent ${info.parentID})`)
+        } else {
+          const sid = info?.id ?? evt.properties?.sessionID ?? evt.properties?.id
+          if (sid) {
+            void tryAutoConnect(sid)
+          }
         }
       } else if (
         !autoConnectAttempted &&
@@ -454,10 +464,14 @@ const plugin: Plugin = async (ctx) => {
         !isConnecting &&
         evt.type.startsWith("session.")
       ) {
-        const sid = evt.properties?.sessionID ?? evt.properties?.info?.id ?? evt.properties?.id
-        if (sid) {
-          autoConnectAttempted = true
-          void tryAutoConnect(sid)
+        if (evt.properties?.info?.parentID) {
+          log(`[auto-connect] skip subagent session event (parent ${evt.properties.info.parentID})`)
+        } else {
+          const sid = evt.properties?.sessionID ?? evt.properties?.info?.id ?? evt.properties?.id
+          if (sid) {
+            autoConnectAttempted = true
+            void tryAutoConnect(sid)
+          }
         }
       }
 
