@@ -61,6 +61,7 @@ describe("createOutboundBridge", () => {
   let discord: ReturnType<typeof createMockDiscordClient>
   let agentDisplay: ReturnType<typeof createMockAgentDisplay>
   let fetchAgents: ReturnType<typeof mock>
+  let bridge: ReturnType<typeof createOutboundBridge>
   let handler: (event: any) => Promise<void>
 
   beforeEach(() => {
@@ -71,12 +72,13 @@ describe("createOutboundBridge", () => {
       { name: "sisyphus", mode: "primary" as const },
     ])
 
-    const bridge = createOutboundBridge({
+    bridge = createOutboundBridge({
       discordClient: discord as any,
       state: state as any,
       agentDisplay: agentDisplay as any,
       fetchAgents,
     })
+    bridge.markDiscordTurn("ses_main")
     handler = bridge.handleEvent
   })
 
@@ -406,6 +408,7 @@ describe("createOutboundBridge", () => {
         agentDisplay: agentDisplay as any,
         fetchAgents,
       })
+      bridge.markDiscordTurn("ses_main")
       handler = bridge.handleEvent
 
       await handler({
@@ -432,5 +435,143 @@ describe("createOutboundBridge", () => {
     } finally {
       console.error = originalError
     }
+  })
+
+  it("filters out user's injected prompt from being echoed back to Discord in part.updated", async () => {
+    bridge.trackInjectedText("what is 2 + 2?")
+
+    // 1. User's own prompt event arrives
+    await handler({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "user_part_1",
+          sessionID: "ses_main",
+          messageID: "msg_user",
+          type: "text",
+          text: "what is 2 + 2?",
+        },
+      },
+    })
+
+    // 2. Assistant's response arrives
+    await handler({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "asst_part_1",
+          sessionID: "ses_main",
+          messageID: "msg_asst",
+          type: "text",
+          text: "The answer is 4.",
+        },
+      },
+    })
+
+    await handler({
+      type: "session.idle",
+      properties: { sessionID: "ses_main" },
+    })
+
+    expect(discord.sendMessage).toHaveBeenCalledTimes(1)
+    expect(discord.sendMessage.mock.calls[0]?.[1]).toBe("The answer is 4.")
+    expect(discord.sendMessage.mock.calls[0]?.[1]).not.toContain("what is 2 + 2?")
+  })
+
+  it("purges user prompt from textBuffer at session.idle even if part.updated filter was bypassed", async () => {
+    // Simulate prompt reaching textBuffer first before trackInjectedText was called
+    await handler({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "user_part_1",
+          sessionID: "ses_main",
+          messageID: "msg_user",
+          type: "text",
+          text: "user leaked text\r\nline 2",
+        },
+      },
+    })
+
+    // Now track injected text (with different newline formatting)
+    bridge.trackInjectedText("user leaked text\nline 2")
+
+    // Assistant response
+    await handler({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "asst_part_1",
+          sessionID: "ses_main",
+          messageID: "msg_asst",
+          type: "text",
+          text: "Real answer",
+        },
+      },
+    })
+
+    await handler({
+      type: "session.idle",
+      properties: { sessionID: "ses_main" },
+    })
+
+    expect(discord.sendMessage).toHaveBeenCalledTimes(1)
+    expect(discord.sendMessage.mock.calls[0]?.[1]).toBe("Real answer")
+  })
+
+  it("does not accidentally strip bot response that starts with user prompt (prevents false positive startsWith)", async () => {
+    bridge.trackInjectedText("test")
+
+    // Assistant response begins with "test"
+    await handler({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "asst_part_1",
+          sessionID: "ses_main",
+          messageID: "msg_asst",
+          type: "text",
+          text: "testing passed successfully with all results green",
+        },
+      },
+    })
+
+    await handler({
+      type: "session.idle",
+      properties: { sessionID: "ses_main" },
+    })
+
+    expect(discord.sendMessage).toHaveBeenCalledTimes(1)
+    expect(discord.sendMessage.mock.calls[0]?.[1]).toBe("testing passed successfully with all results green")
+  })
+
+  it("silently drops session.idle when the turn was not initiated from Discord", async () => {
+    const uninitiatedBridge = createOutboundBridge({
+      discordClient: discord as any,
+      state: state as any,
+      agentDisplay: agentDisplay as any,
+      fetchAgents,
+    })
+    // Do NOT call markDiscordTurn
+
+    await uninitiatedBridge.handleEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part1",
+          sessionID: "ses_main",
+          messageID: "msg1",
+          type: "text",
+          text: "TUI message",
+        },
+      },
+    })
+
+    await uninitiatedBridge.handleEvent({
+      type: "session.idle",
+      properties: { sessionID: "ses_main" },
+    })
+
+    expect(discord.sendMessage).not.toHaveBeenCalled()
   })
 })

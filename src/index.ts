@@ -54,6 +54,15 @@ const plugin: Plugin = async (ctx) => {
   }): Promise<void> {
     log(`[promptSession] sessionID=${params.sessionID}`)
 
+    if (outbound && Array.isArray(params.parts)) {
+      for (const p of params.parts) {
+        const text = (p as any)?.text
+        if (typeof text === "string" && text.trim()) {
+          outbound.trackInjectedText(text)
+        }
+      }
+    }
+
     const body: Record<string, unknown> = { parts: params.parts }
     if (params.agent) body.agent = params.agent
 
@@ -62,10 +71,6 @@ const plugin: Plugin = async (ctx) => {
         path: { id: params.sessionID },
         body,
       })
-      if (outbound) {
-        const text = (params.parts[0] as any)?.text
-        if (text) outbound.trackInjectedText(text)
-      }
       log(`[promptSession] result: ${JSON.stringify(result).slice(0, 500)}`)
     } catch (err) {
       log(`[promptSession] promptAsync threw: ${err}`)

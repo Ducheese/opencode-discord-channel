@@ -66,7 +66,9 @@ export function createDiscordClient() {
 
       // Ensure proxy is configured BEFORE discord.js is imported
       setupProxy()
+      log(`[connect] ws-ctor BEFORE discord.js import: ${globalThis.WebSocket && (globalThis.WebSocket as any).name}`)
       const { Client: DiscordClient, GatewayIntentBits } = await import("discord.js")
+      log(`[connect] ws-ctor AFTER discord.js import: ${globalThis.WebSocket && (globalThis.WebSocket as any).name}`)
 
       discordClient = new DiscordClient({
         intents: [

@@ -85,6 +85,10 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
     return cachedAgents
   }
 
+  function normalizeText(text: string): string {
+    return text.trim().replace(/\r\n/g, "\n")
+  }
+
   function trackInjectedText(text: string) {
     injectedTexts.add(text)
     pendingUserTexts.add(text)
@@ -106,12 +110,12 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       if (part.sessionID !== connectedSessionId) return
       if (part.type !== "text") return
       if (part.text) {
-        const trimmed = part.text.trim()
+        const norm = normalizeText(part.text)
         for (const t of injectedTexts) {
-          if (trimmed === t.trim()) return
+          if (norm === normalizeText(t)) return
         }
         for (const t of pendingUserTexts) {
-          if (trimmed === t.trim()) return
+          if (norm === normalizeText(t)) return
         }
       }
       const partKey = part.id ?? part.messageID
@@ -135,17 +139,14 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
         injectedTexts.clear()
         return
       }
-      discordTurnSessions.delete(connectedSessionId)
 
       // Strip user's prompt if it leaked into buffer
       if (textBuffer.size > 0 && pendingUserTexts.size > 0) {
-        const firstKey = textBuffer.keys().next().value as string | undefined
-        const firstText = firstKey ? textBuffer.get(firstKey) : undefined
-        if (firstText) {
-          const ft = firstText.trim()
+        for (const [key, val] of textBuffer.entries()) {
+          const normVal = normalizeText(val)
           for (const t of pendingUserTexts) {
-            if (ft === t.trim() || ft.startsWith(t.trim())) {
-              textBuffer.delete(firstKey!)
+            if (normVal === normalizeText(t)) {
+              textBuffer.delete(key)
               break
             }
           }
@@ -163,7 +164,10 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       }
 
       const allText = [...textBuffer.values()].join("\n\n")
-      if (allText.trim().length === 0) return
+      if (allText.trim().length === 0) {
+        discordTurnSessions.delete(connectedSessionId)
+        return
+      }
 
       const segments = parseContentWithTables(allText)
       for (const segment of segments) {
@@ -175,6 +179,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       }
 
       textBuffer.clear()
+      discordTurnSessions.delete(connectedSessionId)
       return
     }
 

@@ -85,7 +85,23 @@ describe("Integration: full message round-trip", () => {
     state.setBotUserId("bot456")
 
     const discord = createFullMockDiscordClient()
-    const sessionPrompt = mock(async (_params: any) => {})
+    const fetchAgents = mock(async () => [
+      { name: "sisyphus", mode: "primary" as const },
+    ])
+    const outbound = createOutboundBridge({
+      discordClient: discord as any,
+      state,
+      fetchAgents,
+    })
+
+    const sessionPrompt = mock(async (params: any) => {
+      outbound.markDiscordTurn(params.sessionID)
+      if (params.parts) {
+        for (const p of params.parts) {
+          if (p.text) outbound.trackInjectedText(p.text)
+        }
+      }
+    })
 
     createInboundBridge({
       discordClient: discord as any,
@@ -95,15 +111,6 @@ describe("Integration: full message round-trip", () => {
       onQuestionReply: mock(async () => {}),
       getQuestionInfo: () => null,
       onShowAgents: mock(async () => {}),
-    })
-
-    const fetchAgents = mock(async () => [
-      { name: "sisyphus", mode: "primary" as const },
-    ])
-    const outbound = createOutboundBridge({
-      discordClient: discord as any,
-      state,
-      fetchAgents,
     })
 
     await discord.triggerMessage({
@@ -226,6 +233,7 @@ describe("Integration: full message round-trip", () => {
       state,
       fetchAgents,
     })
+    outbound.markDiscordTurn("ses_main")
 
     await outbound.handleEvent({
       type: "session.status",
