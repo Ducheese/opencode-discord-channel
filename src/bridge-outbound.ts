@@ -24,6 +24,12 @@ type OutboundBridgeDeps = {
     | "getSessionId"
     | "getChannelId"
     | "getCurrentAgent"
+    | "markDiscordTurn"
+    | "isDiscordTurn"
+    | "clearDiscordTurn"
+    | "markInjectedText"
+    | "isInjectedText"
+    | "clearInjectedTexts"
     | "addPendingQuestion"
     | "addQuestionMessageId"
     | "getAgentMenuMessageId"
@@ -63,6 +69,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
   handleEvent: (event: OpenCodeEvent) => Promise<void>
   trackInjectedText: (text: string) => void
   markDiscordTurn: (sessionID: string) => void
+  clearBuffers: () => void
 } {
   const { discordClient, state, fetchAgents } = deps
   const display = deps.agentDisplay ?? {
@@ -70,9 +77,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
     buildAgentSelectMenu,
   }
   const textBuffer = new Map<string, string>()
-  const injectedTexts = new Set<string>()
   const pendingUserTexts = new Set<string>()
-  const discordTurnSessions = new Set<string>()
   let cachedAgents: AgentInfo[] | null = null
   let cachedAt = 0
   const CACHE_TTL = 30_000
@@ -90,30 +95,31 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
   }
 
   function trackInjectedText(text: string) {
-    injectedTexts.add(text)
+    state.markInjectedText(text)
     pendingUserTexts.add(text)
   }
 
   function markDiscordTurn(sessionID: string) {
-    discordTurnSessions.add(sessionID)
+    state.markDiscordTurn(sessionID)
+  }
+
+  function clearBuffers() {
+    textBuffer.clear()
+    pendingUserTexts.clear()
   }
 
   async function handleEvent(event: OpenCodeEvent): Promise<void> {
     if (!state.isConnected()) return
 
-    const connectedSessionId = state.getSessionId()
-    if (!connectedSessionId) return
-
     if (event.type === "message.part.updated") {
       const part = event.properties?.part
       if (!part) return
-      if (part.sessionID !== connectedSessionId) return
+      const sessionID = part.sessionID
+      if (!sessionID || sessionID !== state.getSessionId() || !state.isDiscordTurn(sessionID)) return
       if (part.type !== "text") return
       if (part.text) {
         const norm = normalizeText(part.text)
-        for (const t of injectedTexts) {
-          if (norm === normalizeText(t)) return
-        }
+        if (state.isInjectedText(part.text)) return
         for (const t of pendingUserTexts) {
           if (norm === normalizeText(t)) return
         }
@@ -126,19 +132,11 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
     }
 
     const sessionID = event.properties?.sessionID
-    if (sessionID !== connectedSessionId) return
+    if (!sessionID || sessionID !== state.getSessionId() || !state.isDiscordTurn(sessionID)) return
 
     if (event.type === "session.idle") {
       const channelId = state.getChannelId()
       if (!channelId) return
-
-      // Only mirror to Discord if this turn was initiated from Discord
-      if (!discordTurnSessions.has(connectedSessionId)) {
-        textBuffer.clear()
-        pendingUserTexts.clear()
-        injectedTexts.clear()
-        return
-      }
 
       // Strip user's prompt if it leaked into buffer
       if (textBuffer.size > 0 && pendingUserTexts.size > 0) {
@@ -153,7 +151,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
         }
       }
       pendingUserTexts.clear()
-      injectedTexts.clear()
+      state.clearInjectedTexts()
 
       const menuMsgId = state.getAgentMenuMessageId()
       if (menuMsgId) {
@@ -165,7 +163,7 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
 
       const allText = [...textBuffer.values()].join("\n\n")
       if (allText.trim().length === 0) {
-        discordTurnSessions.delete(connectedSessionId)
+        state.clearDiscordTurn(sessionID)
         return
       }
 
@@ -179,15 +177,14 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       }
 
       textBuffer.clear()
-      discordTurnSessions.delete(connectedSessionId)
+      state.clearDiscordTurn(sessionID)
       return
     }
 
     if (event.type === "question.asked") {
       const req = event.properties
       if (!req || !req.id || !req.questions?.length) return
-      if (req.sessionID !== connectedSessionId) return
-      if (!discordTurnSessions.has(connectedSessionId)) return
+      if (req.sessionID !== sessionID) return
 
       const channelId = state.getChannelId()
       if (!channelId) return
@@ -212,12 +209,11 @@ export function createOutboundBridge(deps: OutboundBridgeDeps): {
       event.type === "session.status" &&
       event.properties?.status?.type === "busy"
     ) {
-      if (!discordTurnSessions.has(connectedSessionId)) return
       const channelId = state.getChannelId()
       if (!channelId) return
       await discordClient.startTyping(channelId)
     }
   }
 
-  return { handleEvent, trackInjectedText, markDiscordTurn }
+  return { handleEvent, trackInjectedText, markDiscordTurn, clearBuffers }
 }

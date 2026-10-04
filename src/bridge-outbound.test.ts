@@ -9,6 +9,8 @@ function createMockState(
     currentAgent: string | null
   }> = {},
 ) {
+  const discordTurnSessions = new Set<string>()
+  const injectedTexts = new Set<string>()
   const defaults = {
     isConnected: true,
     sessionId: "ses_main",
@@ -21,7 +23,14 @@ function createMockState(
     isConnected: () => defaults.isConnected,
     getSessionId: () => defaults.sessionId,
     getChannelId: () => defaults.channelId,
+    setSessionId: (sessionID: string | null) => { defaults.sessionId = sessionID },
     getCurrentAgent: () => defaults.currentAgent,
+    markDiscordTurn: (sessionID: string) => discordTurnSessions.add(sessionID),
+    isDiscordTurn: (sessionID: string) => discordTurnSessions.has(sessionID),
+    clearDiscordTurn: (sessionID: string) => discordTurnSessions.delete(sessionID),
+    markInjectedText: (text: string) => injectedTexts.add(text),
+    isInjectedText: (text: string) => injectedTexts.has(text),
+    clearInjectedTexts: () => injectedTexts.clear(),
     getState: () => ({ ...defaults }),
     addPendingQuestion: mock(() => {}),
     addQuestionMessageId: mock(() => {}),
@@ -66,6 +75,7 @@ describe("createOutboundBridge", () => {
 
   beforeEach(() => {
     state = createMockState()
+    state.markDiscordTurn("ses_main")
     discord = createMockDiscordClient()
     agentDisplay = createMockAgentDisplay()
     fetchAgents = mock(async () => [
@@ -78,7 +88,6 @@ describe("createOutboundBridge", () => {
       agentDisplay: agentDisplay as any,
       fetchAgents,
     })
-    bridge.markDiscordTurn("ses_main")
     handler = bridge.handleEvent
   })
 
@@ -546,9 +555,10 @@ describe("createOutboundBridge", () => {
   })
 
   it("silently drops session.idle when the turn was not initiated from Discord", async () => {
+    const uninitiatedState = createMockState()
     const uninitiatedBridge = createOutboundBridge({
       discordClient: discord as any,
-      state: state as any,
+      state: uninitiatedState as any,
       agentDisplay: agentDisplay as any,
       fetchAgents,
     })

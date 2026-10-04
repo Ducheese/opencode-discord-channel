@@ -47,6 +47,16 @@ describe("BridgeConfig", () => {
     expect(config.botToken).toBe("token123")
     expect(config.sessionId).toBe("ses_abc")
   })
+
+  it("allows the Discord bot to connect before a session has been selected", () => {
+    const config: BridgeConfig = {
+      botToken: "token123",
+      ownerId: "owner456",
+      channelId: "channel789",
+      sessionId: null,
+    }
+    expect(config.sessionId).toBeNull()
+  })
 })
 
 describe("DiscordMessage", () => {

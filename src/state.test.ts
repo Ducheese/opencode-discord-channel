@@ -79,6 +79,37 @@ describe("createConnectionState", () => {
     })
   })
 
+  describe("active session routing", () => {
+    it("updates the Discord target without reconnecting", () => {
+      const state = createConnectionState()
+      state.connect(validConfig)
+      state.setSessionId("ses_latest")
+      expect(state.getSessionId()).toBe("ses_latest")
+      expect(state.isConnected()).toBe(true)
+      expect(state.getChannelId()).toBe(validConfig.channelId)
+    })
+
+    it("tracks Discord-originated turns per session", () => {
+      const state = createConnectionState()
+      state.markDiscordTurn("ses_a")
+      state.markDiscordTurn("ses_b")
+      expect(state.isDiscordTurn("ses_a")).toBe(true)
+      expect(state.isDiscordTurn("ses_b")).toBe(true)
+      state.clearDiscordTurn("ses_a")
+      expect(state.isDiscordTurn("ses_a")).toBe(false)
+      expect(state.isDiscordTurn("ses_b")).toBe(true)
+    })
+
+    it("tracks injected Discord prompt texts", () => {
+      const state = createConnectionState()
+      state.markInjectedText("hello from discord")
+      expect(state.isInjectedText("hello from discord")).toBe(true)
+      expect(state.isInjectedText("typed locally")).toBe(false)
+      state.clearInjectedTexts()
+      expect(state.isInjectedText("hello from discord")).toBe(false)
+    })
+  })
+
   describe("agent management", () => {
     it("setCurrentAgent updates current agent", () => {
       const state = createConnectionState()

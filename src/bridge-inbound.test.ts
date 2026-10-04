@@ -112,7 +112,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage(ownerMessage)
@@ -132,7 +131,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage(ownerMessage)
@@ -151,7 +149,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage(ownerMessage)
@@ -170,7 +167,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage({
@@ -194,7 +190,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage({
@@ -217,7 +212,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage({
@@ -240,7 +234,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage({
@@ -263,7 +256,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerMessage(ownerMessage)
@@ -283,7 +275,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerSelectMenu(
@@ -305,7 +296,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerSelectMenu(
@@ -327,7 +317,6 @@ describe("createInboundBridge", () => {
         onAgentSwitch,
         onQuestionReply: mock(async () => {}),
         getQuestionInfo: () => null,
-          onShowAgents: mock(async () => {}),
       })
 
       await discord.triggerSelectMenu(

@@ -2,12 +2,14 @@ import { proxyUrl, setupProxy } from "./proxy"
 import type {
   Client,
   TextChannel,
-  EmbedBuilder,
+} from "discord.js"
+import type {
   ActionRowBuilder,
   ButtonBuilder,
-  StringSelectMenuBuilder,
+  EmbedBuilder,
   MessageActionRowComponentBuilder,
-} from "discord.js"
+  StringSelectMenuBuilder,
+} from "@discordjs/builders"
 import { splitMessage } from "./message-splitter"
 import type { DiscordMessage } from "./types"
 import { ProxyAgent as UndiciProxyAgent } from "undici"
@@ -315,9 +317,6 @@ export function createDiscordClient() {
         new SlashCommandBuilder()
           .setName("agents")
           .setDescription("Show agent selector"),
-        new SlashCommandBuilder()
-          .setName("status")
-          .setDescription("Show OpenCode bridge status"),
       ].map((c) => c.toJSON())
 
       const rest = new REST({

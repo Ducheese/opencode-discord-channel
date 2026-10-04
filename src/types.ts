@@ -23,7 +23,7 @@ export interface BridgeConfig {
   botToken: string
   ownerId: string
   channelId: string
-  sessionId: string
+  sessionId?: string | null
 }
 
 export interface DiscordMessage {

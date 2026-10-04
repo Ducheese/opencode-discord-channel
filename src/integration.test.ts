@@ -110,7 +110,6 @@ describe("Integration: full message round-trip", () => {
       onAgentSwitch: mock((_name: string) => {}),
       onQuestionReply: mock(async () => {}),
       getQuestionInfo: () => null,
-      onShowAgents: mock(async () => {}),
     })
 
     await discord.triggerMessage({
@@ -168,7 +167,6 @@ describe("Integration: full message round-trip", () => {
       onAgentSwitch: agentSwitchCallback,
       onQuestionReply: mock(async () => {}),
       getQuestionInfo: () => null,
-      onShowAgents: mock(async () => {}),
     })
 
     await discord.triggerSelectMenu("agent_select", ["oracle"], "owner123")
@@ -261,7 +259,6 @@ describe("Integration: full message round-trip", () => {
       onAgentSwitch: mock((_name: string) => {}),
       onQuestionReply: mock(async () => {}),
       getQuestionInfo: () => null,
-      onShowAgents: mock(async () => {}),
     })
 
     await discord.triggerMessage({

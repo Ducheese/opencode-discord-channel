@@ -6,6 +6,9 @@ export interface DiscordChannelConfig {
   botToken?: string
   ownerId?: string
   defaultChannelId?: string
+  activeSessionId?: string
+  activeSessionAt?: number
+  activeSessionDirectory?: string
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".config", "opencode")
@@ -42,11 +45,17 @@ export function resolveConfig(): {
   botToken: string | undefined
   ownerId: string | undefined
   defaultChannelId: string | undefined
+  activeSessionId: string | undefined
+  activeSessionAt: number | undefined
+  activeSessionDirectory: string | undefined
 } {
   const fileConfig = loadConfig()
   return {
     botToken: process.env.DISCORD_BOT_TOKEN ?? fileConfig.botToken,
     ownerId: process.env.DISCORD_OWNER_ID ?? fileConfig.ownerId,
     defaultChannelId: fileConfig.defaultChannelId,
+    activeSessionId: fileConfig.activeSessionId,
+    activeSessionAt: fileConfig.activeSessionAt,
+    activeSessionDirectory: fileConfig.activeSessionDirectory,
   }
 }

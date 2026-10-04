@@ -4,7 +4,10 @@ mock.module("./config", () => ({
   resolveConfig: () => ({
     botToken: process.env.DISCORD_BOT_TOKEN,
     ownerId: process.env.DISCORD_OWNER_ID,
-    defaultChannelId: undefined,
+    defaultChannelId: process.env.TEST_DISCORD_CHANNEL_ID,
+    activeSessionId: process.env.TEST_ACTIVE_SESSION_ID,
+    activeSessionAt: undefined,
+    activeSessionDirectory: undefined,
   }),
   getConfigPath: () => "/tmp/opencode-discord-channel.json",
   loadConfig: () => ({}),
@@ -12,12 +15,57 @@ mock.module("./config", () => ({
   updateConfig: mock((partial: any) => partial),
 }))
 
+let resolveConnect: (() => void) | null = null
+let inboundMessageHandler:
+  | ((msg: {
+      content: string
+      authorId: string
+      username: string
+      channelId: string
+      messageId: string
+    }) => void)
+  | null = null
+
+const fakeDiscordClient = {
+  connect: () =>
+    new Promise<void>((resolve) => {
+      resolveConnect = resolve
+    }),
+  disconnect: mock(async () => {}),
+  validateChannel: mock(async () => true),
+  registerSlashCommands: mock(async () => {}),
+  onSlashCommand: mock(() => {}),
+  onMessage: mock((handler: typeof inboundMessageHandler) => {
+    inboundMessageHandler = handler
+  }),
+  onButtonInteraction: mock(() => {}),
+  onSelectMenuInteraction: mock(() => {}),
+  onRawButtonInteraction: mock(() => {}),
+  onModalSubmit: mock(() => {}),
+  sendMessage: mock(async () => {}),
+  sendEmbed: mock(async () => {}),
+  sendSelectMenu: mock(async () => "msg_menu"),
+  startTyping: mock(async () => {}),
+  sendQuestion: mock(async () => "msg_q"),
+  deleteMessage: mock(async () => {}),
+  getBotUserId: () => "bot1",
+}
+mock.module("./discord-client", () => ({
+  createDiscordClient: () => fakeDiscordClient,
+}))
+
 const pluginModule = await import("./index")
 const plugin = pluginModule.default
+const updateConfigMock = (await import("./config")).updateConfig
+
+const promptAsyncMock = mock(async (_opts: any) => {})
 
 const mockCtx = {
   client: {
-    session: { promptAsync: async () => {} },
+    session: {
+      promptAsync: promptAsyncMock,
+      get: async ({ path }: any) => ({ data: { id: path.id } }),
+    },
     app: { agents: async () => ({ data: [] }) },
   },
   project: { id: "test-project" },
@@ -28,10 +76,14 @@ const mockCtx = {
 
 const origBotToken = process.env.DISCORD_BOT_TOKEN
 const origOwnerId = process.env.DISCORD_OWNER_ID
+const origChannelId = process.env.TEST_DISCORD_CHANNEL_ID
+const origActiveSessionId = process.env.TEST_ACTIVE_SESSION_ID
 
 function cleanEnv() {
   delete process.env.DISCORD_BOT_TOKEN
   delete process.env.DISCORD_OWNER_ID
+  delete process.env.TEST_DISCORD_CHANNEL_ID
+  delete process.env.TEST_ACTIVE_SESSION_ID
 }
 
 function restoreEnv() {
@@ -39,6 +91,48 @@ function restoreEnv() {
   else delete process.env.DISCORD_BOT_TOKEN
   if (origOwnerId !== undefined) process.env.DISCORD_OWNER_ID = origOwnerId
   else delete process.env.DISCORD_OWNER_ID
+  if (origChannelId !== undefined) process.env.TEST_DISCORD_CHANNEL_ID = origChannelId
+  else delete process.env.TEST_DISCORD_CHANNEL_ID
+  if (origActiveSessionId !== undefined) process.env.TEST_ACTIVE_SESSION_ID = origActiveSessionId
+  else delete process.env.TEST_ACTIVE_SESSION_ID
+}
+
+let connected = false
+
+async function ensureConnected(): Promise<void> {
+  if (connected) return
+  process.env.DISCORD_BOT_TOKEN = "token"
+  process.env.DISCORD_OWNER_ID = "owner"
+  process.env.TEST_DISCORD_CHANNEL_ID = "channel"
+  await plugin(mockCtx as any)
+  expect(resolveConnect).not.toBeNull()
+  resolveConnect!()
+  for (
+    let i = 0;
+    i < 50 && fakeDiscordClient.registerSlashCommands.mock.calls.length === 0;
+    i++
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  expect(fakeDiscordClient.registerSlashCommands).toHaveBeenCalled()
+  connected = true
+}
+
+function simulateInbound(content: string): void {
+  expect(inboundMessageHandler).not.toBeNull()
+  inboundMessageHandler!({
+    content,
+    authorId: "owner",
+    username: "owner",
+    channelId: "channel",
+    messageId: "msg_in",
+  })
+}
+
+async function waitFor(get: () => number): Promise<void> {
+  for (let i = 0; i < 50 && get() === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
 }
 
 describe("opencode-discord-channel plugin", () => {
@@ -60,14 +154,10 @@ describe("opencode-discord-channel plugin", () => {
       expect(hooks).toBeObject()
     })
 
-    it("includes config hook", async () => {
+    it("registers no command hooks", async () => {
       const hooks = await plugin(mockCtx as any)
-      expect(typeof hooks.config).toBe("function")
-    })
-
-    it("includes command.execute.before hook", async () => {
-      const hooks = await plugin(mockCtx as any)
-      expect(typeof hooks["command.execute.before"]).toBe("function")
+      expect(hooks.config).toBeUndefined()
+      expect(hooks["command.execute.before"]).toBeUndefined()
     })
 
     it("includes event hook", async () => {
@@ -83,148 +173,235 @@ describe("opencode-discord-channel plugin", () => {
     })
   })
 
-  describe("config hook registers commands", () => {
-    it("registers dc:connect command with $ARGUMENTS in template", async () => {
-      const hooks = await plugin(mockCtx as any)
-      const config: any = { command: {} }
-      await hooks.config!(config)
-      expect(config.command["dc:connect"]).toBeDefined()
-      expect(config.command["dc:connect"].template).toContain("$ARGUMENTS")
-    })
+  describe("startup connect", () => {
+    it("does not override a session that received a prompt while connecting", async () => {
+      process.env.DISCORD_BOT_TOKEN = "token"
+      process.env.DISCORD_OWNER_ID = "owner"
+      process.env.TEST_DISCORD_CHANNEL_ID = "channel"
+      process.env.TEST_ACTIVE_SESSION_ID = "ses_persisted"
+      try {
+        const hooks = await plugin(mockCtx as any)
+        await hooks["chat.message"]!(
+          { sessionID: "ses_during_connect" },
+          { message: { time: { created: 500 } } as any, parts: [] },
+        )
+        expect(resolveConnect).not.toBeNull()
+        resolveConnect!()
+        for (
+          let i = 0;
+          i < 50 && fakeDiscordClient.registerSlashCommands.mock.calls.length === 0;
+          i++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 1))
+        }
+        expect(fakeDiscordClient.registerSlashCommands).toHaveBeenCalled()
 
-    it("registers dc:disconnect command", async () => {
-      const hooks = await plugin(mockCtx as any)
-      const config: any = { command: {} }
-      await hooks.config!(config)
-      expect(config.command["dc:disconnect"]).toBeDefined()
-      expect(config.command["dc:disconnect"].template).toBeDefined()
-    })
-
-    it("registers dc:status command", async () => {
-      const hooks = await plugin(mockCtx as any)
-      const config: any = { command: {} }
-      await hooks.config!(config)
-      expect(config.command["dc:status"]).toBeDefined()
-      expect(config.command["dc:status"].template).toBeDefined()
-    })
-
-    it("initialises config.command when it is undefined", async () => {
-      const hooks = await plugin(mockCtx as any)
-      const config: any = {}
-      await hooks.config!(config)
-      expect(config.command).toBeDefined()
-      expect(config.command["dc:connect"]).toBeDefined()
-    })
-
-    it("includes description for each command", async () => {
-      const hooks = await plugin(mockCtx as any)
-      const config: any = { command: {} }
-      await hooks.config!(config)
-      expect(config.command["dc:connect"].description).toBeDefined()
-      expect(config.command["dc:disconnect"].description).toBeDefined()
-      expect(config.command["dc:status"].description).toBeDefined()
+        simulateInbound("ping")
+        await waitFor(() => promptAsyncMock.mock.calls.length)
+        expect(promptAsyncMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ path: { id: "ses_during_connect" } }),
+        )
+        connected = true
+      } finally {
+        delete process.env.DISCORD_BOT_TOKEN
+        delete process.env.DISCORD_OWNER_ID
+        delete process.env.TEST_DISCORD_CHANNEL_ID
+        delete process.env.TEST_ACTIVE_SESSION_ID
+      }
     })
   })
 
-  describe("command.execute.before hook", () => {
-    it("handles dc:connect with missing DISCORD_BOT_TOKEN — returns error", async () => {
+  describe("chat.message hook", () => {
+    beforeEach(() => updateConfigMock.mockClear())
+
+    it("persists the latest main session as Discord target", async () => {
       const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:connect", sessionID: "ses_test", arguments: "123456789" },
-        output,
+      await hooks["chat.message"]!(
+        { sessionID: "ses_main" },
+        { message: { time: { created: 1234 } } as any, parts: [] },
       )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text).toContain("DISCORD_BOT_TOKEN")
+      expect(updateConfigMock).toHaveBeenCalledWith({
+        activeSessionId: "ses_main",
+        activeSessionAt: 1234,
+        activeSessionDirectory: "/test",
+      })
     })
 
-    it("handles dc:connect with missing channel ID argument — returns error", async () => {
-      process.env.DISCORD_BOT_TOKEN = "test-token"
-      const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:connect", sessionID: "ses_test", arguments: "" },
-        output,
-      )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text.toLowerCase()).toContain("channel")
-    })
-
-    it("handles dc:connect with whitespace-only channel ID — returns error", async () => {
-      process.env.DISCORD_BOT_TOKEN = "test-token"
-      const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:connect", sessionID: "ses_test", arguments: "   " },
-        output,
-      )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text.toLowerCase()).toContain("channel")
-    })
-
-    it("handles dc:connect with missing DISCORD_OWNER_ID — returns error", async () => {
-      process.env.DISCORD_BOT_TOKEN = "test-token"
-      const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        {
-          command: "dc:connect",
-          sessionID: "ses_test",
-          arguments: "123456789",
+    it("does not let subagent messages replace the active target", async () => {
+      const client = {
+        ...mockCtx.client,
+        session: {
+          ...mockCtx.client.session,
+          get: async ({ path }: any) => ({ data: { id: path.id, parentID: "ses_main" } }),
         },
-        output,
+      }
+      const hooks = await plugin({ ...mockCtx, client } as any)
+      await hooks["chat.message"]!(
+        { sessionID: "ses_subagent" },
+        { message: { time: { created: 1234 } } as any, parts: [] },
       )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text).toContain("DISCORD_OWNER_ID")
+      expect(updateConfigMock).not.toHaveBeenCalled()
     })
 
-    it("handles dc:status and returns connection state text", async () => {
+    it("keeps the most recently received main-session message as target", async () => {
       const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:status", sessionID: "ses_test", arguments: "" },
-        output,
+      await hooks["chat.message"]!(
+        { sessionID: "ses_newer" },
+        { message: { time: { created: 2000 } } as any, parts: [] },
       )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text.toLowerCase()).toContain("status")
+      await hooks["chat.message"]!(
+        { sessionID: "ses_older" },
+        { message: { time: { created: 1000 } } as any, parts: [] },
+      )
+      expect(updateConfigMock).toHaveBeenLastCalledWith({
+        activeSessionId: "ses_newer",
+        activeSessionAt: 2000,
+        activeSessionDirectory: "/test",
+      })
+    })
+  })
+
+  describe("Discord turn detection (end to end)", () => {
+    beforeEach(() => {
+      promptAsyncMock.mockClear()
+      fakeDiscordClient.sendMessage.mockClear()
     })
 
-    it("dc:status shows 'Not connected' when disconnected", async () => {
+    it("mirrors the reply of a turn that started from Discord", async () => {
+      await ensureConnected()
       const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:status", sessionID: "ses_test", arguments: "" },
-        output,
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_discord" },
+        { message: { time: { created: 3000 } } as any, parts: [] },
       )
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text).toContain("Not connected")
+
+      simulateInbound("hello from discord")
+      await waitFor(() => promptAsyncMock.mock.calls.length)
+      expect(promptAsyncMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ path: { id: "ses_discord" } }),
+      )
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_discord" },
+        {
+          message: { time: { created: 3001 } } as any,
+          parts: [{ type: "text", text: "hello from discord" }],
+        },
+      )
+
+      await hooks.event!({
+        event: {
+          type: "message.part.updated",
+          properties: {
+            part: {
+              id: "part_discord",
+              sessionID: "ses_discord",
+              messageID: "msg_discord",
+              type: "text",
+              text: "The answer is 4.",
+            },
+          },
+        } as any,
+      })
+      await hooks.event!({
+        event: {
+          type: "session.idle",
+          properties: { sessionID: "ses_discord" },
+        } as any,
+      })
+
+      expect(fakeDiscordClient.sendMessage).toHaveBeenCalledWith(
+        "channel",
+        "The answer is 4.",
+      )
     })
 
-    it("handles dc:disconnect and returns confirmation", async () => {
+    it("does not mirror a reply for a locally typed turn", async () => {
+      await ensureConnected()
       const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "dc:disconnect", sessionID: "ses_test", arguments: "" },
-        output,
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_local" },
+        { message: { time: { created: 3100 } } as any, parts: [] },
       )
-      expect(output.parts.length).toBeGreaterThan(0)
-      const text = (output.parts[0] as any).text ?? ""
-      expect(text.toLowerCase()).toContain("disconnect")
+
+      await hooks.event!({
+        event: {
+          type: "message.part.updated",
+          properties: {
+            part: {
+              id: "part_local",
+              sessionID: "ses_local",
+              messageID: "msg_local",
+              type: "text",
+              text: "locally generated reply",
+            },
+          },
+        } as any,
+      })
+      await hooks.event!({
+        event: {
+          type: "session.idle",
+          properties: { sessionID: "ses_local" },
+        } as any,
+      })
+
+      expect(fakeDiscordClient.sendMessage).not.toHaveBeenCalled()
     })
 
-    it("ignores unknown commands — parts remain empty", async () => {
+    it("keeps a Discord turn alive when a delayed message from an older session arrives", async () => {
+      await ensureConnected()
       const hooks = await plugin(mockCtx as any)
-      const output = { parts: [] as any[] }
-      await hooks["command.execute.before"]!(
-        { command: "other:command", sessionID: "ses_test", arguments: "" },
-        output,
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_a" },
+        { message: { time: { created: 4000 } } as any, parts: [] },
       )
-      expect(output.parts).toHaveLength(0)
+      simulateInbound("hi from discord")
+      await waitFor(() => promptAsyncMock.mock.calls.length)
+      expect(promptAsyncMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ path: { id: "ses_a" } }),
+      )
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_b" },
+        { message: { time: { created: 4001 } } as any, parts: [] },
+      )
+
+      await hooks["chat.message"]!(
+        { sessionID: "ses_a" },
+        {
+          message: { time: { created: 4002 } } as any,
+          parts: [{ type: "text", text: "hi from discord" }],
+        },
+      )
+
+      await hooks.event!({
+        event: {
+          type: "message.part.updated",
+          properties: {
+            part: {
+              id: "part_a",
+              sessionID: "ses_a",
+              messageID: "msg_a",
+              type: "text",
+              text: "answer from A",
+            },
+          },
+        } as any,
+      })
+      await hooks.event!({
+        event: {
+          type: "session.idle",
+          properties: { sessionID: "ses_a" },
+        } as any,
+      })
+
+      expect(fakeDiscordClient.sendMessage).toHaveBeenCalledWith(
+        "channel",
+        "answer from A",
+      )
     })
   })
 })

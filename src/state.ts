@@ -17,13 +17,15 @@ export function createConnectionState() {
 
   const pendingQuestions = new Map<string, PendingQuestion>()
   const questionMessageIds = new Map<string, string[]>()
+  const discordTurnSessions = new Set<string>()
+  const injectedTexts = new Set<string>()
   let agentMenuMessageId: string | null = null
 
   return {
     connect(config: BridgeConfig): void {
       state = {
         connected: true,
-        sessionId: config.sessionId,
+        sessionId: config.sessionId ?? null,
         channelId: config.channelId,
         ownerId: config.ownerId,
         botUserId: null,
@@ -40,10 +42,52 @@ export function createConnectionState() {
         botUserId: null,
         currentAgent: null,
       }
+      pendingQuestions.clear()
+      questionMessageIds.clear()
+      discordTurnSessions.clear()
+      injectedTexts.clear()
+      agentMenuMessageId = null
     },
 
     setBotUserId(id: string): void {
       state = { ...state, botUserId: id }
+    },
+
+    setSessionId(id: string | null): void {
+      state = { ...state, sessionId: id }
+    },
+
+    markDiscordTurn(id: string): void {
+      if (discordTurnSessions.has(id)) return
+      if (discordTurnSessions.size >= 128) {
+        const oldest = discordTurnSessions.values().next().value
+        if (oldest) discordTurnSessions.delete(oldest)
+      }
+      discordTurnSessions.add(id)
+    },
+
+    isDiscordTurn(id: string): boolean {
+      return discordTurnSessions.has(id)
+    },
+
+    clearDiscordTurn(id: string): void {
+      discordTurnSessions.delete(id)
+    },
+
+    markInjectedText(text: string): void {
+      if (injectedTexts.size >= 256) {
+        const oldest = injectedTexts.values().next().value
+        if (oldest) injectedTexts.delete(oldest)
+      }
+      injectedTexts.add(text)
+    },
+
+    isInjectedText(text: string): boolean {
+      return injectedTexts.has(text)
+    },
+
+    clearInjectedTexts(): void {
+      injectedTexts.clear()
     },
 
     setCurrentAgent(name: string): void {

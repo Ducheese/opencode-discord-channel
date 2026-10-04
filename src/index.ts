@@ -6,7 +6,7 @@ import { createInboundBridge } from "./bridge-inbound"
 import { createOutboundBridge } from "./bridge-outbound"
 import { createSystemPromptHook } from "./system-prompt"
 import { buildAgentEmbed, buildAgentSelectMenu } from "./agent-display"
-import { resolveConfig, updateConfig, getConfigPath } from "./config"
+import { resolveConfig, updateConfig } from "./config"
 import type { DiscordClientWrapper } from "./discord-client"
 import type { ConnectionStateManager } from "./state"
 import type { AgentInfo, QuestionAnswer, QuestionRequest } from "./types"
@@ -18,6 +18,18 @@ import * as path from "path"
 let activeDiscordClient: DiscordClientWrapper | null = null
 let activeState: ConnectionStateManager | null = null
 let activeEventHandler: ((event: any) => Promise<void>) | null = null
+let activeOutboundBridge: ReturnType<typeof createOutboundBridge> | null = null
+let activeContext: Parameters<Plugin>[0] | null = null
+const handledEventIds = new Set<string>()
+const questionRequests = new Map<string, QuestionRequest>()
+const instanceOwners = new Set<symbol>()
+const instanceContexts = new Map<symbol, Parameters<Plugin>[0]>()
+const instanceOutboundBridges = new Map<symbol, ReturnType<typeof createOutboundBridge>>()
+let inboundInitialized = false
+let discordConnectPromise: Promise<void> | null = null
+let activeSessionAt = 0
+let chatHookSequence = 0
+let activeSessionSequence = 0
 
 const logFile = path.join(os.tmpdir(), "opencode-discord-channel.log")
 function log(msg: string) {
@@ -27,25 +39,19 @@ function log(msg: string) {
 }
 
 const plugin: Plugin = async (ctx) => {
-  if (activeDiscordClient) {
-    await activeDiscordClient.disconnect().catch(() => {})
-    activeDiscordClient = null
-  }
-  if (activeState) {
-    activeState.disconnect()
-    activeState = null
-  }
-  activeEventHandler = null
-
-  const discordClient = createDiscordClient()
-  const state = createConnectionState()
+  const owner = Symbol("discord-channel-instance")
+  instanceOwners.add(owner)
+  instanceContexts.set(owner, ctx)
+  const persistedTarget = resolveConfig()
+  activeSessionAt = Math.max(activeSessionAt, persistedTarget.activeSessionAt ?? 0)
+  if (persistedTarget.activeSessionDirectory === ctx.directory) activeContext = ctx
+  const discordClient = activeDiscordClient ?? createDiscordClient()
+  const state = activeState ?? createConnectionState()
   activeDiscordClient = discordClient
   activeState = state
 
   let outbound: ReturnType<typeof createOutboundBridge> | null = null
-  const questionRequests = new Map<string, QuestionRequest>()
   let isConnecting = false
-  let autoConnectAttempted = false
 
   async function promptSession(params: {
     sessionID: string
@@ -66,8 +72,9 @@ const plugin: Plugin = async (ctx) => {
     const body: Record<string, unknown> = { parts: params.parts }
     if (params.agent) body.agent = params.agent
 
+    const currentContext = activeContext ?? ctx
     try {
-      const result = await (ctx.client as any).session.promptAsync({
+      const result = await (currentContext.client as any).session.promptAsync({
         path: { id: params.sessionID },
         body,
       })
@@ -75,7 +82,7 @@ const plugin: Plugin = async (ctx) => {
     } catch (err) {
       log(`[promptSession] promptAsync threw: ${err}`)
       try {
-        const result = await (ctx.client as any).session.prompt({
+        const result = await (currentContext.client as any).session.prompt({
           path: { id: params.sessionID },
           body: { parts: params.parts },
         })
@@ -92,7 +99,8 @@ const plugin: Plugin = async (ctx) => {
     answers: QuestionAnswer[],
   ): Promise<void> {
     log(`[question] reply requestID=${requestID}`)
-    const internalClient = (ctx.client as any)._client
+    const currentContext = activeContext ?? ctx
+    const internalClient = (currentContext.client as any)._client
     if (internalClient?.post) {
       const result = await internalClient.post({
         url: `/question/${encodeURIComponent(requestID)}/reply`,
@@ -108,7 +116,7 @@ const plugin: Plugin = async (ctx) => {
         )
       }
     } else {
-      const baseUrl = ctx.serverUrl.toString().replace(/\/$/, "")
+      const baseUrl = currentContext.serverUrl.toString().replace(/\/$/, "")
       const url = `${baseUrl}/question/${encodeURIComponent(requestID)}/reply`
       log(`[question] reply POST ${url}`)
       const resp = await fetch(url, {
@@ -127,7 +135,7 @@ const plugin: Plugin = async (ctx) => {
 
   async function fetchAgents(): Promise<AgentInfo[]> {
     try {
-      const result = await ctx.client.app.agents()
+      const result = await (activeContext ?? ctx).client.app.agents()
       const agents = result.data ?? []
       return agents.map((a: any) => ({
         name: a.name,
@@ -140,13 +148,15 @@ const plugin: Plugin = async (ctx) => {
     }
   }
 
-  outbound = createOutboundBridge({
+  outbound = activeOutboundBridge ?? createOutboundBridge({
     discordClient,
     state,
     agentDisplay: { buildAgentEmbed, buildAgentSelectMenu },
     fetchAgents,
   })
   activeEventHandler = outbound.handleEvent
+  activeOutboundBridge = outbound
+  instanceOutboundBridges.set(owner, outbound)
 
   const systemPromptHook = createSystemPromptHook(state)
 
@@ -154,144 +164,79 @@ const plugin: Plugin = async (ctx) => {
     token: string
     ownerId: string
     channelId: string
-    sessionId: string
+    sessionId?: string | null
   }): Promise<void> {
     if (
       state.isConnected() &&
-      state.getChannelId() === params.channelId &&
-      state.getSessionId() === params.sessionId
+      state.getChannelId() === params.channelId
     ) {
-      log(`[connect] already connected to ${params.channelId} on session ${params.sessionId}`)
+      log(`[connect] already connected to ${params.channelId}`)
+      if (params.sessionId && !state.getSessionId()) state.setSessionId(params.sessionId)
       return
     }
 
-    log(`[connect] connecting to discord with channel=${params.channelId} session=${params.sessionId}`)
-    await discordClient.connect(params.token)
-
-    const channelValid = await discordClient.validateChannel(params.channelId)
-    if (!channelValid) {
-      await discordClient.disconnect().catch(() => {})
-      state.disconnect()
-      throw new Error(`Channel ${params.channelId} not found or bot lacks access.`)
+    if (discordConnectPromise) {
+      await discordConnectPromise
+      if (state.isConnected() && state.getChannelId() === params.channelId) {
+        if (params.sessionId && !state.getSessionId()) state.setSessionId(params.sessionId)
+        return
+      }
     }
 
-    state.connect({
-      botToken: params.token,
-      ownerId: params.ownerId,
-      channelId: params.channelId,
-      sessionId: params.sessionId,
-    })
+    log(`[connect] connecting to discord with channel=${params.channelId}`)
+    const connecting = (async () => {
+      await discordClient.connect(params.token)
 
-    const botUserId = discordClient.getBotUserId() ?? ""
-    state.setBotUserId(botUserId)
-    updateConfig({ defaultChannelId: params.channelId })
+      const channelValid = await discordClient.validateChannel(params.channelId)
+      if (!channelValid) {
+        await discordClient.disconnect().catch(() => {})
+        state.disconnect()
+        throw new Error(`Channel ${params.channelId} not found or bot lacks access.`)
+      }
 
+      state.connect({
+        botToken: params.token,
+        ownerId: params.ownerId,
+        channelId: params.channelId,
+        sessionId: state.getSessionId() ?? params.sessionId ?? null,
+      })
+
+      const botUserId = discordClient.getBotUserId() ?? ""
+      state.setBotUserId(botUserId)
+      updateConfig({ defaultChannelId: params.channelId })
+
+      try {
+        await discordClient.registerSlashCommands(params.token, params.channelId)
+        log("[slash] commands registered")
+      } catch (err) {
+        log(`[slash] registration warning: ${err}`)
+      }
+
+      log(`[connect] success: Discord bridge connected to channel ${params.channelId}`)
+    })()
+    discordConnectPromise = connecting
     try {
-      await discordClient.registerSlashCommands(params.token, params.channelId)
-      log("[slash] commands registered")
-    } catch (err) {
-      log(`[slash] registration warning: ${err}`)
+      await connecting
+    } finally {
+      if (discordConnectPromise === connecting) discordConnectPromise = null
     }
-
-    discordClient.onSlashCommand(async (command, interaction) => {
-      if (command === "agents") {
-        if (!state.isConnected()) {
-          await interaction.reply({ content: "Not connected.", ephemeral: true })
-          return
-        }
-        const ch = interaction.channelId as string
-        await interaction.deferReply({ ephemeral: true })
-        try {
-          const agents = await fetchAgents()
-          if (agents.length <= 1) {
-            await interaction.editReply({ content: "No agents available." })
-            return
-          }
-          const currentAgent = state.getCurrentAgent() ?? agents[0]?.name ?? ""
-          const embed = buildAgentEmbed(currentAgent)
-          const rows = buildAgentSelectMenu(agents, currentAgent)
-          if (rows.length > 0) {
-            const msgId = await discordClient.sendSelectMenu(ch, embed, rows)
-            state.setAgentMenuMessageId(msgId)
-          }
-          await interaction.editReply({ content: "Agent selector sent." })
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Unknown error"
-          await interaction.editReply({ content: `Failed: ${msg}` }).catch(() => {})
-        }
-        return
-      }
-
-      if (command === "status") {
-        const s = state.getState()
-        const statusText = s.connected
-          ? `Connected to channel <#${s.channelId}> (agent: **${s.currentAgent ?? "default"}**)`
-          : "Not connected."
-        await interaction.reply({ content: statusText, ephemeral: true })
-        return
-      }
-
-      await interaction.reply({ content: "Unknown command.", ephemeral: true })
-    })
-
-    createInboundBridge({
-      discordClient,
-      state,
-      sessionPrompt: async (p) => {
-        outbound?.markDiscordTurn(p.sessionID)
-        await promptSession({
-          sessionID: p.sessionID,
-          agent: p.agent,
-          parts: p.parts.map((part) => textPart(part.text)),
-        })
-      },
-      onAgentSwitch: async (agentName) => {
-        state.setCurrentAgent(agentName)
-        const sid = state.getSessionId()
-        if (sid) outbound?.markDiscordTurn(sid)
-        await promptSession({
-          sessionID: state.getSessionId()!,
-          agent: agentName,
-          parts: [textPart(`(Agent switched to ${agentName} via Discord)`)],
-        }).catch(() => {})
-      },
-      onQuestionReply: replyQuestion,
-      getQuestionInfo: (requestID, questionIndex) => {
-        const req = questionRequests.get(requestID)
-        return req?.questions[questionIndex] ?? null
-      },
-      onShowAgents: async () => {
-        const ch = state.getChannelId()
-        if (!ch) return
-        const agents = await fetchAgents()
-        if (agents.length <= 1) return
-        const currentAgent = state.getCurrentAgent() ?? agents[0]?.name ?? ""
-        const embed = buildAgentEmbed(currentAgent)
-        const rows = buildAgentSelectMenu(agents, currentAgent)
-        if (rows.length > 0) {
-          const msgId = await discordClient.sendSelectMenu(ch, embed, rows)
-          state.setAgentMenuMessageId(msgId)
-        }
-      },
-    })
-
-    log(`[connect] success: Discord bridge connected to channel ${params.channelId}`)
   }
 
-  async function tryAutoConnect(sessionId: string): Promise<boolean> {
-    if (state.isConnected() || isConnecting) return false
+  async function tryAutoConnect(): Promise<boolean> {
+    if (state.isConnected() || isConnecting) return state.isConnected()
     const cfg = resolveConfig()
     if (!cfg.botToken || !cfg.ownerId || !cfg.defaultChannelId) {
+      log("[auto-connect] missing bot token, owner ID, or default channel ID")
       return false
     }
     isConnecting = true
     try {
-      log(`[auto-connect] auto-connecting to channel=${cfg.defaultChannelId} sessionId=${sessionId}`)
+      log(`[auto-connect] auto-connecting to channel=${cfg.defaultChannelId}`)
       await doConnect({
         token: cfg.botToken,
         ownerId: cfg.ownerId,
         channelId: cfg.defaultChannelId,
-        sessionId,
+        sessionId: cfg.activeSessionId ?? null,
       })
       return true
     } catch (err) {
@@ -302,182 +247,125 @@ const plugin: Plugin = async (ctx) => {
     }
   }
 
-  return {
-    async config(config) {
-      config.command = config.command ?? {}
-      config.command["dc:connect"] = {
-        template:
-          "[opencode-discord-channel plugin: bridge connected to $ARGUMENTS]",
-        description:
-          "(plugin: discord-channel) Connect Discord bridge to a channel",
+  discordClient.onSlashCommand(async (command, interaction) => {
+    if (command !== "agents") {
+      await interaction.reply({ content: "Unknown command.", ephemeral: true })
+      return
+    }
+    if (!state.isConnected()) {
+      await interaction.reply({ content: "Discord bridge is not connected.", ephemeral: true })
+      return
+    }
+    const ch = interaction.channelId as string
+    await interaction.deferReply({ ephemeral: true })
+    try {
+      const agents = await fetchAgents()
+      if (agents.length <= 1) {
+        await interaction.editReply({ content: "No agents available." })
+        return
       }
-      config.command["dc:disconnect"] = {
-        template: "[opencode-discord-channel plugin: bridge disconnected]",
-        description:
-          "(plugin: discord-channel) Disconnect Discord bridge",
+      const currentAgent = state.getCurrentAgent() ?? agents[0]?.name ?? ""
+      const embed = buildAgentEmbed(currentAgent)
+      const rows = buildAgentSelectMenu(agents, currentAgent)
+      if (rows.length > 0) {
+        const msgId = await discordClient.sendSelectMenu(ch, embed, rows)
+        state.setAgentMenuMessageId(msgId)
       }
-      config.command["dc:status"] = {
-        template: "[opencode-discord-channel plugin: status check]",
-        description:
-          "(plugin: discord-channel) Show Discord bridge connection status",
-      }
-      config.command["dc:agents"] = {
-        template: "[opencode-discord-channel plugin: show agent selector]",
-        description:
-          "(plugin: discord-channel) Show agent selector in Discord",
-      }
+      await interaction.editReply({ content: "Agent selector sent." })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error"
+      await interaction.editReply({ content: `Failed: ${msg}` }).catch(() => {})
+    }
+  })
+
+  if (!inboundInitialized) createInboundBridge({
+    discordClient,
+    state,
+    sessionPrompt: async (p) => {
+      activeOutboundBridge?.markDiscordTurn(p.sessionID)
+      await promptSession({
+        sessionID: p.sessionID,
+        agent: p.agent,
+        parts: p.parts.map((part) => textPart(part.text)),
+      })
     },
+    onAgentSwitch: async (agentName) => {
+      state.setCurrentAgent(agentName)
+      const sid = state.getSessionId()
+      if (sid) activeOutboundBridge?.markDiscordTurn(sid)
+      if (!sid) return
+      await promptSession({
+        sessionID: sid,
+        agent: agentName,
+        parts: [textPart(`(Agent switched to ${agentName} via Discord)`)],
+      }).catch(() => {})
+    },
+    onQuestionReply: replyQuestion,
+    getQuestionInfo: (requestID, questionIndex) => {
+      const req = questionRequests.get(requestID)
+      return req?.questions[questionIndex] ?? null
+    },
+  })
+  if (!inboundInitialized) inboundInitialized = true
 
-    async "command.execute.before"(input, output) {
-      const { command, sessionID, arguments: args } = input
+  void tryAutoConnect()
 
-      if (command === "dc:connect") {
-        const resolved = resolveConfig()
-        const token = resolved.botToken
-        if (!token) {
-          output.parts = [
-            textPart(
-              `Error: No bot token found. Set DISCORD_BOT_TOKEN env var or create config at ${getConfigPath()}`,
-            ),
-          ]
-          return
-        }
-
-        const channelId = args.trim() || resolved.defaultChannelId
-        if (!channelId) {
-          output.parts = [
-            textPart(
-              "Error: Please provide a Discord channel ID. Usage: /dc:connect <channel_id>",
-            ),
-          ]
-          return
-        }
-
-        const ownerId = resolved.ownerId
-        if (!ownerId) {
-          output.parts = [
-            textPart(
-              `Error: No owner ID found. Set DISCORD_OWNER_ID env var or add to config at ${getConfigPath()}`,
-            ),
-          ]
-          return
-        }
-
-        try {
-          await doConnect({
-            token,
-            ownerId,
-            channelId,
-            sessionId: sessionID,
-          })
-
-          output.parts = [
-            textPart(
-              `Discord bridge connected to channel ${channelId}. Messages from this channel will appear here.`,
-            ),
-          ]
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Unknown error"
-          output.parts = [
-            textPart(`Failed to connect Discord bot: ${msg}`),
-          ]
-        }
+  return {
+    async "chat.message"(input, output) {
+      const sequence = ++chatHookSequence
+      try {
+        const result = await (ctx.client as any).session.get({ path: { id: input.sessionID } })
+        if (!result?.data || result.data.parentID) return
+      } catch (err) {
+        log(`[session] failed to inspect ${input.sessionID}: ${err}`)
         return
       }
 
-      if (command === "dc:disconnect") {
-        await discordClient.disconnect().catch(() => {})
-        state.disconnect()
-        output.parts = [textPart("Discord bridge disconnected.")]
+      const messageAt = Number(output.message?.time?.created ?? Date.now())
+      const config = resolveConfig()
+      if (
+        sequence < activeSessionSequence ||
+        messageAt < Math.max(activeSessionAt, config.activeSessionAt ?? 0)
+      ) {
         return
       }
-
-      if (command === "dc:status") {
-        const s = state.getState()
-        const resolved = resolveConfig()
-        const configStatus = resolved.botToken
-          ? "configured"
-          : "not configured"
-        const statusText = s.connected
-          ? `Connected to channel ${s.channelId} (session: ${s.sessionId}, agent: ${s.currentAgent ?? "default"})`
-          : `Not connected. Config: ${configStatus} (${getConfigPath()})`
-        output.parts = [
-          textPart(`Discord bridge status: ${statusText}`),
-        ]
-        return
+      activeSessionSequence = sequence
+      activeSessionAt = messageAt
+      activeContext = ctx
+      if (state.getSessionId() !== input.sessionID) {
+        activeOutboundBridge?.clearBuffers()
       }
-
-      if (command === "dc:agents") {
-        if (!state.isConnected()) {
-          output.parts = [
-            textPart("Discord bridge not connected. Use /dc:connect first."),
-          ]
-          return
-        }
-        const channelId = state.getChannelId()
-        if (!channelId) return
-        try {
-          const agents = await fetchAgents()
-          if (agents.length > 1) {
-            const currentAgent =
-              state.getCurrentAgent() ?? agents[0]?.name ?? ""
-            const embed = buildAgentEmbed(currentAgent)
-            const rows = buildAgentSelectMenu(agents, currentAgent)
-            if (rows.length > 0) {
-              const msgId = await discordClient.sendSelectMenu(channelId, embed, rows)
-              state.setAgentMenuMessageId(msgId)
-            }
-          }
-          output.parts = [textPart("Agent selector sent to Discord.")]
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Unknown error"
-          output.parts = [textPart(`Failed to show agents: ${msg}`)]
-        }
-        return
-      }
+      state.setSessionId(input.sessionID)
+      const fromDiscord = output.parts.some(
+        (part) => part.type === "text" && state.isInjectedText(part.text),
+      )
+      if (fromDiscord) state.markDiscordTurn(input.sessionID)
+      else state.clearDiscordTurn(input.sessionID)
+      updateConfig({
+        activeSessionId: input.sessionID,
+        activeSessionAt: messageAt,
+        activeSessionDirectory: ctx.directory,
+      })
+      log(`[session] active Discord target updated to ${input.sessionID}`)
     },
 
     async event({ event }) {
       const evt = event as { type: string; properties?: any }
+      const eventId = (event as any)?.id
+      if (typeof eventId === "string") {
+        if (handledEventIds.has(eventId)) return
+        handledEventIds.add(eventId)
+        if (handledEventIds.size > 2048) {
+          const oldest = handledEventIds.values().next().value
+          if (oldest) handledEventIds.delete(oldest)
+        }
+      }
       if (
         evt.type === "question.asked" &&
         evt.properties?.id &&
         evt.properties?.questions
       ) {
         questionRequests.set(evt.properties.id, evt.properties)
-      }
-
-      // Auto-connect on session.created or first session event.
-      // Subagent sessions must never steal the bridge: every session gets its
-      // own plugin instance, and a second gateway connect with the same token
-      // kicks the previous one on Discord's side (2026-09-13: a review Task's
-      // instance rebound the bridge to itself and answered Discord from there).
-      // Subagent sessions always carry info.parentID; main sessions don't.
-      if (evt.type === "session.created" && !state.isConnected() && !isConnecting) {
-        const info = evt.properties?.info
-        if (info?.parentID) {
-          log(`[auto-connect] skip subagent session ${info.id} (parent ${info.parentID})`)
-        } else {
-          const sid = info?.id ?? evt.properties?.sessionID ?? evt.properties?.id
-          if (sid) {
-            void tryAutoConnect(sid)
-          }
-        }
-      } else if (
-        !autoConnectAttempted &&
-        !state.isConnected() &&
-        !isConnecting &&
-        evt.type.startsWith("session.")
-      ) {
-        if (evt.properties?.info?.parentID) {
-          log(`[auto-connect] skip subagent session event (parent ${evt.properties.info.parentID})`)
-        } else {
-          const sid = evt.properties?.sessionID ?? evt.properties?.info?.id ?? evt.properties?.id
-          if (sid) {
-            autoConnectAttempted = true
-            void tryAutoConnect(sid)
-          }
-        }
       }
 
       if (activeEventHandler) {
@@ -491,8 +379,31 @@ const plugin: Plugin = async (ctx) => {
 
     async dispose() {
       log("[plugin] dispose: cleaning up Discord connection")
+      instanceOwners.delete(owner)
+      instanceContexts.delete(owner)
+      instanceOutboundBridges.delete(owner)
+      if (activeEventHandler === outbound?.handleEvent) {
+        activeOutboundBridge = [...instanceOwners]
+          .map((instance) => instanceOutboundBridges.get(instance))
+          .find((bridge): bridge is ReturnType<typeof createOutboundBridge> => Boolean(bridge)) ?? null
+        activeEventHandler = activeOutboundBridge?.handleEvent ?? null
+      }
+      if (activeContext === ctx) activeContext = [...instanceOwners]
+        .map((instance) => instanceContexts.get(instance))
+        .find((context): context is Parameters<Plugin>[0] => Boolean(context)) ?? null
+      if (instanceOwners.size > 0) return
+      activeContext = null
+      activeSessionSequence = 0
+      activeSessionAt = 0
+      handledEventIds.clear()
+      instanceOutboundBridges.clear()
+      activeOutboundBridge = null
+      inboundInitialized = false
       await discordClient.disconnect().catch(() => {})
       state.disconnect()
+      activeEventHandler = null
+      activeDiscordClient = null
+      activeState = null
     },
   }
 }

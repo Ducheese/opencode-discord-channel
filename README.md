@@ -1,17 +1,18 @@
 # opencode-discord-channel
 
-An [OpenCode](https://opencode.ai) plugin that bridges a Discord channel to your OpenCode session. Chat with your AI coding assistant from Discord with full bidirectional messaging, interactive question prompts, and agent switching.
+An [OpenCode](https://opencode.ai) plugin that automatically bridges a configured Discord channel to the most recently used main OpenCode session. Chat with your AI coding assistant from Discord with full bidirectional messaging, interactive question prompts, and agent switching.
 
 ## Features
 
 - **Bidirectional messaging** -- Discord messages are forwarded to your OpenCode session; AI responses are sent back to Discord.
 - **Question sync** -- When OpenCode asks a question (e.g. file selection, confirmation), it appears in Discord as an interactive embed with a select menu. Pick an answer or type a custom one via modal. The question message auto-deletes after you answer.
-- **Agent switching** -- Switch between agents using the `/agents` slash command in Discord or `/dc:agents` in OpenCode. The agent selector auto-deletes after selection or when the next message arrives.
-- **Slash commands** -- `/agents` and `/status` are registered as guild commands for instant availability.
+- **Agent switching** -- Switch between agents using the `/agents` slash command in Discord. The agent selector auto-deletes after selection or when the next message arrives.
+- **Automatic connection** -- The bot connects on plugin startup. The Discord target always follows the main session where you most recently sent a prompt; switching sessions does not reconnect the Discord gateway.
+- **Slash commands** -- `/agents` shows the agent selector.
 - **Owner-only access** -- Only messages from the configured owner ID are forwarded to the session.
 - **Long message splitting** -- Responses over 2000 characters are split intelligently, preserving code block formatting.
 - **Typing indicator** -- Discord shows "typing..." while the AI generates a response.
-- **Persistent config** -- Bot token, owner ID, and channel ID are saved to a config file. No need to re-enter them every time.
+- **Persistent config** -- Bot token, owner ID, channel ID, and latest main session are saved in a config file.
 
 ## Quick Start
 
@@ -38,15 +39,17 @@ Create `~/.config/opencode/discord-channel.json`:
 
 See [Discord Bot Setup](#discord-bot-setup) below if you don't have a bot yet.
 
-**3. Connect**
+**3. Set the channel and start OpenCode**
 
-In OpenCode, run:
+Add `defaultChannelId` to `~/.config/opencode/discord-channel.json`. The plugin connects automatically at startup. Send a prompt in any main OpenCode session to make it the Discord target. The selected session is saved and reused after restart until another main session receives a prompt.
 
+```json
+{
+  "botToken": "your-bot-token-here",
+  "ownerId": "your-discord-user-id",
+  "defaultChannelId": "your-discord-channel-id"
+}
 ```
-/dc:connect <channel_id>
-```
-
-The channel ID is saved after the first connection. Next time, just run `/dc:connect`.
 
 ## Discord Bot Setup
 
@@ -66,7 +69,8 @@ The channel ID is saved after the first connection. Next time, just run `/dc:con
 ```json
 {
   "botToken": "your-bot-token-here",
-  "ownerId": "your-discord-user-id"
+  "ownerId": "your-discord-user-id",
+  "defaultChannelId": "your-discord-channel-id"
 }
 ```
 
@@ -79,47 +83,40 @@ export DISCORD_OWNER_ID="your-discord-user-id"
 
 Environment variables take priority over the config file.
 
+The selected main session, its last-message timestamp, and working directory are stored as `activeSessionId`, `activeSessionAt`, and `activeSessionDirectory` in the same config file.
+
 ## Commands
-
-### OpenCode Commands
-
-| Command | Description |
-|---|---|
-| `/dc:connect <channel_id>` | Connect the bridge to a Discord channel. Channel ID is saved for next time. |
-| `/dc:connect` | Reconnect to the previously saved channel. |
-| `/dc:disconnect` | Disconnect the bridge. |
-| `/dc:status` | Show bridge connection status. |
-| `/dc:agents` | Show agent selector in Discord. |
 
 ### Discord Slash Commands
 
 | Command | Description |
 |---|---|
 | `/agents` | Show agent selector dropdown. |
-| `/status` | Show bridge connection status. |
 
-Slash commands are registered as guild commands when the bridge connects, so they are available instantly.
+`/agents` is registered as a guild command when the bot connects.
 
 ## How It Works
 
-1. You send a message in the connected Discord channel.
-2. The plugin forwards it to your active OpenCode session.
-3. OpenCode processes the message and generates a response.
-4. The response is sent back to Discord, split across multiple messages if needed.
+1. The plugin connects to the configured Discord channel at startup.
+2. A prompt you send in an OpenCode main session makes that session the current Discord target.
+3. Mention the bot in the connected Discord channel; the plugin forwards the message to the current target session.
+4. OpenCode processes it and generates a response, which is sent back to Discord, split across multiple messages if needed.
 5. If OpenCode asks a question (file picker, confirmation, etc.), it appears as an interactive embed in Discord.
 6. You answer via select menu or type a custom response. The question cleans up after itself.
+
+If no target session has been saved yet, the bot connects but ignores incoming chat until you send a prompt in an OpenCode main session. Subagent sessions never change the target.
 
 ## Architecture
 
 | Module | Responsibility |
 |---|---|
-| `index.ts` | Plugin entry point. Wires all modules together, handles commands, question replies, and slash command registration. |
+| `index.ts` | Plugin entry point. Connects the bot at startup, tracks the latest main session, and wires question replies and agent switching. |
 | `bridge-inbound.ts` | Discord to OpenCode. Processes messages, select menu interactions, button clicks, and modal submissions. |
 | `bridge-outbound.ts` | OpenCode to Discord. Handles events (message updates, session idle, questions, typing status). |
 | `discord-client.ts` | Discord.js wrapper. Manages connection, message sending, interaction handlers, and slash command registration. |
 | `question-display.ts` | Renders OpenCode questions as Discord embeds with select menus, custom answer buttons, and modals. |
 | `agent-display.ts` | Renders agent selector as Discord embed with select menu. Filters out internal agents. |
-| `state.ts` | Connection state, pending questions, and agent menu message tracking. |
+| `state.ts` | Connection state, Discord target session, turn and injected-text tracking, pending questions, and agent menu message tracking. |
 | `config.ts` | Config file read/write (`~/.config/opencode/discord-channel.json`). |
 | `system-prompt.ts` | Injects Discord formatting instructions into the system prompt. |
 | `message-splitter.ts` | Splits long messages at code block and paragraph boundaries. |
@@ -138,7 +135,7 @@ Slash commands are registered as guild commands when the bridge connects, so the
 git clone https://github.com/CTHua/opencode-discord-channel.git
 cd opencode-discord-channel
 pnpm install
-pnpm test        # 119 tests
+pnpm test
 pnpm run build   # outputs to dist/
 ```
 
